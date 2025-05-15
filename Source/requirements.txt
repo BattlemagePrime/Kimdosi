@@ -1,0 +1,21 @@
+# GUI
+PyQt6>=6.5.0
+
+# Core Dependencies
+psutil>=5.9.0
+opencv-python>=4.8.0
+pyautogui>=0.9.54
+numpy>=1.24.0
+watchdog>=3.0.0
+
+# For VM Management
+pywin32>=305; platform_system == "Windows"
+
+# For File Operations
+python-magic>=0.4.27; platform_system != "Windows"
+python-magic-bin>=0.4.14; platform_system == "Windows"
+
+# Utility Dependencies
+pillow>=10.0.0  # For screenshot functionality
+requests>=2.31.0  # For downloading tools
+tqdm>=4.65.0  # For progress bars
