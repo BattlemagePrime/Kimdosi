@@ -6,6 +6,7 @@ from typing import Dict, Any
 from datetime import datetime
 import time
 from .vm_manager import create_vm_manager, VMManager
+from Utils.zip_handler import ZipHandler
 
 class TransferManager:
     def __init__(self, workspace_root: Path = None):
@@ -77,8 +78,18 @@ class TransferManager:
 
     def _copy_selected_tools(self, tool_config: Dict[str, bool]) -> None:
         """Copy selected tools to the Tool_Transfer directory"""
+        # First, always copy 7z as it's required
+        seven_zip_path = self.tools_root / "7z"
+        if not seven_zip_path.exists():
+            raise FileNotFoundError("7-Zip tool not found in Tools/7z directory")
+        dest_path = self.tool_transfer_path / "7z"
+        if dest_path.exists():
+            shutil.rmtree(dest_path)
+        shutil.copytree(seven_zip_path, dest_path)
+        
+        # Then copy other selected tools
         for tool_name, enabled in tool_config.items():
-            if enabled:
+            if enabled and tool_name != "7z":  # Skip 7z as we already copied it
                 tool_path = self.tools_root / tool_name
                 if not tool_path.exists():
                     raise FileNotFoundError(f"Tool not found: {tool_name}")
@@ -104,54 +115,42 @@ class TransferManager:
         Returns:
             Path to the created zip file
         """
-        timestamp = datetime.now().strftime("%Y%m%d")
-        zip_path = self.tool_transfer_path / f"tools_{timestamp}.zip"
+        zip_path = self.tool_transfer_path / "tools.zip"
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             # Add each file and directory to the zip
             for item in self.tool_transfer_path.iterdir():
                 if item.name != zip_path.name:  # Skip the zip file itself
                     if item.is_file():
-                        zipf.write(item, item.name)
+                        zipf.write(str(item), item.name)
                     elif item.is_dir():
                         for file_path in item.rglob("*"):
                             if file_path.is_file():
                                 # Get relative path from Tool_Transfer directory
                                 rel_path = file_path.relative_to(self.tool_transfer_path)
-                                zipf.write(file_path, rel_path)
+                                zipf.write(str(file_path), str(rel_path))
         return zip_path
-
-    def _send_to_vm(self, tools_zip: Path, binary_path: Path, vm_config: Dict[str, Any]) -> None:
-        """Send tools and binary to the virtual machine"""
-        # Ensure transfer directories exist
-        self.tool_transfer_path.mkdir(exist_ok=True)
-        self.binary_transfer_path.mkdir(exist_ok=True)
-
-        # Create VM manager
-        vm_manager = create_vm_manager(vm_config["type"], vm_config.get("hypervisor_path"))
         
-        # Start VM and optionally restore snapshot
+    def _send_to_vm(self, tools_zip: Path, binary_path: Path, vm_config: Dict[str, Any]) -> None:
+        """Send tools and binary to the virtual machine and set up the environment"""
+        # Create VM manager and start VM
+        print("\n=== Starting VM ===")
+        vm_manager = create_vm_manager(vm_config["type"], vm_config.get("hypervisor_path"))
         success, error = vm_manager.start_vm(vm_config["path"], vm_config.get("snapshot"))
         if not success:
             raise Exception(f"Failed to start VM: {error}")
             
-        # Poll for VM readiness with timeout
-        timeout = time.time() + 30  # 30 second timeout
-        while time.time() < timeout:
-            ready, error = vm_manager.check_vm_ready(vm_config["path"])
-            if ready:
-                break
-            time.sleep(1)  # Wait 1 second before checking again
-        else:
-            raise Exception("Timed out waiting for VM to become ready")
+        # Poll for VM readiness
+        self._wait_for_vm(vm_manager, vm_config)
             
-        # Get desktop path based on username
-        desktop_path = fr"C:\Users\{vm_config['username']}\Desktop"
+        # Get desktop path and create Analysis directory
+        base_desktop = fr"C:\Users\{vm_config['username']}\Desktop"
+        print(f"\n=== Setting up VM directories ===\nBase desktop path: {base_desktop}")
+        self._create_vm_directories(vm_manager, vm_config, base_desktop)
         
-        # First transfer both files to ensure they're available before unzipping
-        
-        # Transfer tools.zip
-        tools_dest = fr"{desktop_path}\tools.zip"
+        # Transfer tools.zip and extract to Tools folder
+        print("\n=== Transferring tools.zip ===")
+        tools_dest = fr"{base_desktop}\tools.zip"
         success, error = vm_manager.copy_to_guest(
             vm_config["path"],
             str(tools_zip),
@@ -161,12 +160,39 @@ class TransferManager:
         )
         if not success:
             raise Exception(f"Failed to copy tools to VM: {error}")
-            
-        # Transfer binary
-        binary_dest = fr"{desktop_path}\binary{binary_path.suffix}"
+
+        # Create Tools directory and extract
+        print("\n=== Extracting tools.zip ===")
+        tools_dir = fr"{base_desktop}\Tools"
+        extract_cmd = f'powershell -Command "New-Item -Path \'{tools_dir}\' -ItemType Directory -Force; Expand-Archive -Path \'{tools_dest}\' -DestinationPath \'{tools_dir}\' -Force"'
+        print(f"Tools extraction command: {extract_cmd}")
+        success, error = vm_manager.execute_command(
+            vm_config["path"],
+            extract_cmd,
+            vm_config["username"],
+            vm_config["password"]
+        )
+        if not success:
+            raise Exception(f"Failed to extract tools in VM: {error}")
+
+        # Remove the tools zip file after extraction
+        print("\n=== Cleaning up tools.zip ===")
+        delete_cmd = f'powershell -Command "Remove-Item -Path \'{tools_dest}\' -Force"'
+        print(f"Delete tools.zip command: {delete_cmd}")
+        vm_manager.execute_command(
+            vm_config["path"],
+            delete_cmd,
+            vm_config["username"],
+            vm_config["password"]
+        )
+
+        # Transfer binary file to VM
+        print("\n=== Transferring binary file ===")
+        binary_dest = fr"{base_desktop}\{binary_path.name}"
+        print(f"Binary destination: {binary_dest}")
         success, error = vm_manager.copy_to_guest(
             vm_config["path"],
-            str(binary_path), 
+            str(binary_path),
             binary_dest,
             vm_config["username"],
             vm_config["password"]
@@ -174,101 +200,81 @@ class TransferManager:
         if not success:
             raise Exception(f"Failed to copy binary to VM: {error}")
 
-        # Now that both files are transferred, attempt to unzip tools
-        self._unzip_tools_in_vm(vm_manager, vm_config, tools_dest, fr"{desktop_path}\tools")
-
-    def _unzip_tools_in_vm(self, vm_manager: VMManager, vm_config: Dict[str, Any], tools_zip_path: str, desktop_path: str) -> None:
-        """Unzip tools and malware archives in VM after confirming successful transfer"""
-        base_desktop = fr"C:\Users\{vm_config['username']}\Desktop"
-        
-        # First create Analysis_Results directory
-        success, error = vm_manager.run_program_in_guest(
+        # Create binary output directory
+        print("\n=== Creating binary output directory ===")
+        binary_output_dir = fr"{base_desktop}\Binary"
+        create_dir_cmd = f'cmd /c mkdir "{binary_output_dir}" 2>nul'
+        print(f"Create directory command: {create_dir_cmd}")
+        success, error = vm_manager.execute_command(
             vm_config["path"],
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            f'-command "New-Item -ItemType Directory -Path \'{base_desktop}\Analysis_Results\' -Force"',
+            create_dir_cmd,
+            vm_config["username"],
+            vm_config["password"]
+        )
+
+        # Extract binary using 7z with simpler direct command
+        print("\n=== Extracting binary file ===")
+        binary_password = vm_config.get("binary_password", "")
+        password_arg = f'-p{binary_password}' if binary_password else ""
+        
+        # Direct 7z.exe command
+        extract_cmd = f'"{base_desktop}\\Tools\\7z\\7z.exe" e "{binary_dest}" {password_arg} -o"{binary_output_dir}" -y'
+        print(f"Binary extraction command: {extract_cmd}")
+        success, error = vm_manager.execute_command(
+            vm_config["path"],
+            extract_cmd,
             vm_config["username"],
             vm_config["password"]
         )
         if not success:
-            raise Exception(f"Failed to create Analysis_Results directory: {error}")
+            print(f"Binary extraction error: {error}")
+            raise Exception(f"Failed to extract binary in VM: {error}")
 
-        print("[DEBUG] Created Analysis_Results directory")
-
-        # Now unzip the tools
-        success, error = vm_manager.run_program_in_guest(
+        # Remove the binary zip file
+        print("\n=== Cleaning up binary file ===")
+        delete_cmd = f'del "{binary_dest}"'
+        vm_manager.execute_command(
             vm_config["path"],
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            f'-command "Expand-Archive -Path \'{tools_zip_path}\' -DestinationPath \'{base_desktop}\' -Force"',
+            delete_cmd,
+            vm_config["username"],
+            vm_config["password"]
+        )
+        print("\n=== Transfer and extraction complete ===\n")
+
+    def _create_vm_directories(self, vm_manager: VMManager, vm_config: Dict[str, Any], base_desktop: str) -> None:
+        """Create required directories in the VM"""
+        # Only create Analysis directory
+        analysis_dir = fr"{base_desktop}\Analysis"
+        create_dir_cmd = f'powershell -Command "New-Item -Path \'{analysis_dir}\' -ItemType Directory -Force"'
+        success, error = vm_manager.execute_command(
+            vm_config["path"],
+            create_dir_cmd,
             vm_config["username"],
             vm_config["password"]
         )
         if not success:
-            raise Exception(f"Failed to unzip tools in VM: {error}")
+            raise Exception(f"Failed to create Analysis directory in VM: {error}")
 
-        print("[DEBUG] Unzipped tools successfully")
-
-        # Update config with correct VM paths
-        config_path = self.tool_transfer_path / "analysis_config.json"
-        with open(config_path, "r") as f:
-            config = json.load(f)
-
-        # Handle malware unzipping if it's a zip file
-        binary_vm_path = fr"{base_desktop}\binary{Path(config['binary']['path']).suffix}"
-        if binary_vm_path.lower().endswith('.zip'):
-            # Create malware extraction directory
-            malware_dir = fr"{base_desktop}\Binaries"
-            success, error = vm_manager.run_program_in_guest(
-                vm_config["path"],
-                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-                f'-command "New-Item -ItemType Directory -Path \'{malware_dir}\' -Force"',
-                vm_config["username"],
-                vm_config["password"]
-            )
-            if not success:
-                raise Exception(f"Failed to create malware directory: {error}")
-
-            # Unzip malware with password if provided
-            unzip_command = f'-command "'
-            if config['binary'].get('password'):
-                # Use 7-Zip if password is needed
-                unzip_command += fr'& "C:\Program Files\7-Zip\7z.exe" x -p{config["binary"]["password"]} -o"{malware_dir}" "{binary_vm_path}"'
-            else:
-                # Use PowerShell Expand-Archive if no password needed
-                unzip_command += f'Expand-Archive -Path \'{binary_vm_path}\' -DestinationPath \'{malware_dir}\' -Force'
-            unzip_command += '"'
-
-            success, error = vm_manager.run_program_in_guest(
-                vm_config["path"],
-                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-                unzip_command,
-                vm_config["username"],
-                vm_config["password"]
-            )
-            if not success:
-                raise Exception(f"Failed to unzip malware in VM: {error}")
-
-            print("[DEBUG] Unzipped malware successfully")
-
-            # Update the binary path to point to the first file in the malware directory
-            success, error = vm_manager.run_program_in_guest(
-                vm_config["path"],
-                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-                f'-command "$file = Get-ChildItem \'{malware_dir}\' -File | Select-Object -First 1; Write-Output $file.FullName"',
-                vm_config["username"],
-                vm_config["password"]
-            )
-            if not success:
-                raise Exception(f"Failed to get extracted malware path: {error}")
-
-            # Update binary path to point to extracted file
-            config["binary"]["vm_path"] = fr"{malware_dir}\{Path(config['binary']['path']).stem}"
-        else:
-            # Not a zip file, use the original binary path
-            config["binary"]["vm_path"] = binary_vm_path
-
-        # Add results path
-        config["results_path"] = fr"{base_desktop}\Analysis_Results"
+    def _wait_for_vm(self, vm_manager: VMManager, vm_config: Dict[str, Any], timeout: int = 300) -> None:
+        """Wait for VM to be ready, checking by trying to execute a simple command
         
-        # Write updated config back
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=4)
+        Args:
+            vm_manager: The VM manager instance
+            vm_config: VM configuration dictionary
+            timeout: Maximum time to wait in seconds (default: 300)
+        
+        Raises:
+            Exception: If VM is not ready within timeout period
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            success, _ = vm_manager.execute_command(
+                vm_config["path"],
+                "powershell -Command \"echo 'VM Ready'\"",
+                vm_config["username"],
+                vm_config["password"]
+            )
+            if success:
+                return
+            time.sleep(10)
+        raise Exception(f"VM not ready after {timeout} seconds")

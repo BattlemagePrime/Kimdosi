@@ -61,6 +61,12 @@ class VMManager(ABC):
         """Execute a program in the guest VM"""
         pass
 
+    @abstractmethod
+    def execute_command(self, vm_path: str, command: str,
+                       username: str, password: str) -> Tuple[bool, Optional[str]]:
+        """Execute a command in the guest VM"""
+        pass
+
 class VMwareManager(VMManager):
     def __init__(self, vmrun_path: Optional[str] = None):
         """Initialize VMware manager with optional custom vmrun path"""
@@ -230,6 +236,59 @@ class VMwareManager(VMManager):
         except Exception as e:
             print(f"[DEBUG VMware] Unexpected error: {str(e)}")
             return False, f"Error running program in VM: {str(e)}"
+
+    def execute_command(self, vm_path: str, command: str,
+                       username: str, password: str) -> Tuple[bool, Optional[str]]:
+        """Execute a command in the guest VM
+        
+        Args:
+            vm_path: Path to the VM file
+            command: Command to execute in the guest
+            username: Guest OS username
+            password: Guest OS password
+            
+        Returns:
+            Tuple of (success, error_message)
+            success: True if command executed successfully
+            error_message: Error description if success is False, None otherwise
+        """
+        try:
+            if not Path(self.vmrun_path).is_file():
+                return False, "VMware vmrun.exe not found"
+                
+            if not Path(vm_path).is_file():
+                return False, f"VM file not found at: {vm_path}"
+            
+            # VMware requires a program path and arguments to be separate
+            # For PowerShell commands, we use PowerShell as the program
+            result = subprocess.run(
+                [
+                    self.vmrun_path,
+                    "-gu", username,
+                    "-gp", password,
+                    "runProgramInGuest",
+                    vm_path,
+                    "-activeWindow",
+                    "-interactive",
+                    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    command
+                ],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                return False, f"Command failed: {result.stderr}"
+                
+            return True, None
+            
+        except subprocess.CalledProcessError as e:
+            return False, f"Failed to execute command: {str(e)}"
+        except Exception as e:
+            return False, f"Unexpected error: {str(e)}"
 
 class VirtualBoxManager(VMManager):
     def __init__(self, vboxmanage_path: Optional[str] = None):
@@ -420,6 +479,55 @@ class VirtualBoxManager(VMManager):
         except Exception as e:
             print(f"[DEBUG VBox] Unexpected error: {str(e)}")
             return False, f"Error running program in VM: {str(e)}"
+
+    def execute_command(self, vm_path: str, command: str,
+                       username: str, password: str) -> Tuple[bool, Optional[str]]:
+        """Execute a command in the guest VM using VirtualBox tools"""
+        try:
+            if not Path(self.vboxmanage_path).is_file():
+                return False, "VirtualBox VBoxManage.exe not found"
+                
+            if not Path(vm_path).is_file():
+                return False, f"VM file not found at: {vm_path}"
+                
+            # Extract VM name from path
+            vm_name = Path(vm_path).stem
+            
+            print(f"\n[DEBUG VBox] Executing command in guest:")
+            print(f"[DEBUG VBox] VM Name: {vm_name}")
+            print(f"[DEBUG VBox] Command: {command}")
+            
+            process = subprocess.Popen(
+                [self.vboxmanage_path, "guestcontrol", vm_name,
+                 "start", "--username", username, "--password", password,
+                 "cmd.exe", "/c", command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            print("[DEBUG VBox] Process started, waiting for initial response...")
+            
+            # Wait a short time for immediate errors
+            try:
+                process.wait(timeout=2)
+                if process.returncode != 0:
+                    stdout, stderr = process.communicate()
+                    print(f"[DEBUG VBox] Process failed with return code {process.returncode}")
+                    print(f"[DEBUG VBox] stdout: {stdout}")
+                    print(f"[DEBUG VBox] stderr: {stderr}")
+                    return False, f"Failed to execute command: {stderr}"
+                print("[DEBUG VBox] Command executed successfully")
+            except subprocess.TimeoutExpired:
+                print("[DEBUG VBox] Process running in background (timeout expired as expected)")
+                # This is expected - the command is running in the background
+                pass
+                
+            return True, None
+            
+        except Exception as e:
+            print(f"[DEBUG VBox] Unexpected error: {str(e)}")
+            return False, f"Error executing command in VM: {str(e)}"
 
 def create_vm_manager(hypervisor: str, custom_path: Optional[str] = None) -> VMManager:
     """Factory function to create appropriate VM manager"""

@@ -27,7 +27,13 @@ class KimdosiUI(QWidget):
     def init_ui(self):
         self.setWindowTitle("Kimdosi")
         self.setMinimumSize(750, 500)
-        self.setWindowIcon(QIcon("../Images/kimdosi_icon.ico"))
+        
+        # Set window icon using absolute path
+        icon_path = Path(__file__).parent.parent / "Images" / "kimdosi_icon.ico"
+        if not icon_path.exists():
+            icon_path = icon_path.with_name("Kimdosi_icon.png")  # Try PNG as fallback
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         main_layout = QHBoxLayout()
         main_layout.setSpacing(10)
@@ -252,7 +258,7 @@ class KimdosiUI(QWidget):
         self.static_tools = {
             "Capa": QCheckBox("Capa"),
             "Yara": QCheckBox("Yara"), 
-            "Exif": QCheckBox("Exiftool"),
+            "Exiftool": QCheckBox("Exiftool"),
             "Detect-it-Easy": QCheckBox("Detect It Easy"),
             "Floss": QCheckBox("FLOSS"),
             "ResourceExtract": QCheckBox("Resource Extract")
@@ -466,7 +472,6 @@ class KimdosiUI(QWidget):
                 },
                 "binary": {
                     "path": self.binary_path.text(),
-                    "password": self.zip_password.text(),
                     "run": self.run_check.isChecked(),
                     "as_admin": self.admin_check.isChecked()
                 }
@@ -479,6 +484,7 @@ class KimdosiUI(QWidget):
                     "path": self.vm_path.text(),
                     "username": self.username.text(),
                     "password": self.password.text(),
+                    "binary_password": self.zip_password.text(),  # Add binary password here
                     "hypervisor_path": self.hypervisor_path.text() or None,
                     "snapshot": self.snapshot_combo.currentText() or None
                 }
@@ -523,7 +529,7 @@ class KimdosiUI(QWidget):
             "tool_Detect-It-Easy": self.static_tools["Detect-it-Easy"].isChecked(),
             "tool_ResourceExtract": self.static_tools["ResourceExtract"].isChecked(),
             "tool_Autoclicker": self.dynamic_tools["Autoclicker"].isChecked(),
-            "tool_Exiftool": self.static_tools["Exif"].isChecked(),
+            "tool_Exiftool": self.static_tools["Exiftool"].isChecked(),
             "tool_Capture_Dropped_Files": self.dynamic_tools["CaptureFiles"].isChecked(),
             "tool_Screenshots": self.dynamic_tools["Screenshots"].isChecked()
         }
@@ -577,7 +583,7 @@ class KimdosiUI(QWidget):
             self.static_tools["Yara"].setChecked(config.get("tool_Yara", False))
             self.static_tools["Detect-it-Easy"].setChecked(config.get("tool_Detect-It-Easy", False))
             self.static_tools["ResourceExtract"].setChecked(config.get("tool_ResourceExtract", False))
-            self.static_tools["Exif"].setChecked(config.get("tool_Exiftool", False))
+            self.static_tools["Exiftool"].setChecked(config.get("tool_Exiftool", False))
             
             # Load dynamic tools
             self.dynamic_tools["Fakenet"].setChecked(config.get("tool_FakeNet", False))

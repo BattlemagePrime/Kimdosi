@@ -15,7 +15,7 @@ class Overseer:
         self.config = self._load_config()
         self.desktop_path = Path(config_path).parent
         self.tools_path = self.desktop_path / "Tools"
-        self.results_path = Path(self.config.get("results_path", self.desktop_path / "Analysis_Results"))
+        self.results_path = Path(self.config.get("results_path", self.desktop_path / "Analysis"))
         self.utils_path = Path(__file__).parent
         self.setup_logging()
 
